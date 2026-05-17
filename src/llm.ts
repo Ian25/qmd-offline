@@ -374,6 +374,33 @@ function validateGgufFile(filePath: string, modelUri: string): void {
   );
 }
 
+/**
+ * Returns true when the process is running in offline mode (the default).
+ * Set QMD_ONLINE=1 to allow automatic model downloads from Hugging Face.
+ */
+function isOfflineMode(): boolean {
+  return process.env.QMD_ONLINE !== "1";
+}
+
+/**
+ * Resolve the on-disk path of a cached model without touching the network.
+ * For hf: URIs, node-llama-cpp stores files as `hf_<org>_<filename>`.
+ * For absolute/relative paths, the path is used as-is.
+ * Returns null if no matching file is found.
+ */
+function findCachedModelPath(modelUri: string, cacheDir: string): string | null {
+  if (modelUri.startsWith("hf:")) {
+    const parts = modelUri.slice(3).split("/");
+    const org = parts[0];
+    const filename = parts[parts.length - 1];
+    const cachePath = join(cacheDir, `hf_${org}_${filename}`);
+    if (existsSync(cachePath)) return cachePath;
+  } else if (existsSync(modelUri)) {
+    return modelUri;
+  }
+  return null;
+}
+
 export async function pullModels(
   models: string[],
   options: { refresh?: boolean; cacheDir?: string } = {}
@@ -381,6 +408,28 @@ export async function pullModels(
   const cacheDir = options.cacheDir || MODEL_CACHE_DIR;
   if (!existsSync(cacheDir)) {
     mkdirSync(cacheDir, { recursive: true });
+  }
+
+  // Offline mode: verify cache presence only, no network calls.
+  // Set QMD_ONLINE=1 to allow downloads.
+  if (isOfflineMode()) {
+    const results: PullResult[] = [];
+    for (const model of models) {
+      const modelPath = findCachedModelPath(model, cacheDir);
+      if (!modelPath) {
+        throw new Error(
+          `Model not found in local cache.\n` +
+          `Model: ${model}\n` +
+          `Cache: ${cacheDir}\n\n` +
+          `To install this model, download the artifact from GitHub Actions\n` +
+          `and extract it to: ${cacheDir}\n\n` +
+          `To allow automatic downloads, set: QMD_ONLINE=1`
+        );
+      }
+      validateGgufFile(modelPath, model);
+      results.push({ model, path: modelPath, sizeBytes: statSync(modelPath).size, refreshed: false });
+    }
+    return results;
   }
 
   const results: PullResult[] = [];
@@ -814,6 +863,21 @@ export class LlamaCpp implements LLM {
    */
   private async resolveModel(modelUri: string): Promise<string> {
     this.ensureModelCacheDir();
+    if (isOfflineMode()) {
+      const modelPath = findCachedModelPath(modelUri, this.modelCacheDir);
+      if (!modelPath) {
+        throw new Error(
+          `Model not found in local cache.\n` +
+          `Model: ${modelUri}\n` +
+          `Cache: ${this.modelCacheDir}\n\n` +
+          `To install this model, download the artifact from GitHub Actions\n` +
+          `and extract it to: ${this.modelCacheDir}\n\n` +
+          `To allow automatic downloads, set: QMD_ONLINE=1`
+        );
+      }
+      validateGgufFile(modelPath, modelUri);
+      return modelPath;
+    }
     // resolveModelFile handles HF URIs and downloads to the cache dir
     const { resolveModelFile } = await loadNodeLlamaCpp();
     const modelPath = await resolveModelFile(modelUri, this.modelCacheDir);
