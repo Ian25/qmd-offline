@@ -1,0 +1,109 @@
+name: Bundle Models
+
+on:
+  workflow_dispatch:
+    inputs:
+      retention_days:
+        description: Artifact retention in days
+        required: false
+        default: "14"
+
+jobs:
+  bundle:
+    # Safety rail: this workflow is intended for the offline fork only.
+    if: github.repository == 'Ian25/qmd-offline'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    env:
+      EMBED_MODEL: hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf
+      GENERATE_MODEL: hf:tobil/qmd-query-expansion-1.7B-gguf/qmd-query-expansion-1.7B-q4_k_m.gguf
+      RERANK_MODEL: hf:ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/qwen3-reranker-0.6b-q8_0.gguf
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare model directory
+        run: mkdir -p models
+
+      - name: Download models from Hugging Face
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          hf_to_url() {
+            local uri="$1"
+            if [[ "$uri" != hf:* ]]; then
+              echo "Unsupported model URI (expected hf:...): $uri" >&2
+              exit 1
+            fi
+            local ref="${uri#hf:}"
+            local repo="$(echo "$ref" | cut -d'/' -f1-2)"
+            local file="$(echo "$ref" | cut -d'/' -f3-)"
+            echo "https://huggingface.co/${repo}/resolve/main/${file}"
+          }
+
+          download_model() {
+            local kind="$1"
+            local uri="$2"
+            local url
+            url="$(hf_to_url "$uri")"
+            local out
+            out="models/${kind}.gguf"
+
+            echo "Downloading ${kind}: ${uri}"
+            curl -fL --retry 5 --retry-delay 3 --retry-all-errors \
+              "$url" \
+              -o "$out"
+
+            if [[ ! -s "$out" ]]; then
+              echo "Downloaded file is empty: $out" >&2
+              exit 1
+            fi
+
+            # Quick sanity check for GGUF magic bytes.
+            local magic
+            magic="$(head -c 4 "$out")"
+            if [[ "$magic" != "GGUF" ]]; then
+              echo "Invalid GGUF header for $kind (got '$magic')" >&2
+              exit 1
+            fi
+
+            sha256sum "$out" > "${out}.sha256"
+            ls -lh "$out"
+          }
+
+          download_model embed "$EMBED_MODEL"
+          download_model generate "$GENERATE_MODEL"
+          download_model rerank "$RERANK_MODEL"
+
+      - name: Upload embed artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-embed
+          path: |
+            models/embed.gguf
+            models/embed.gguf.sha256
+          if-no-files-found: error
+          retention-days: ${{ fromJSON(inputs.retention_days) }}
+
+      - name: Upload generate artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-generate
+          path: |
+            models/generate.gguf
+            models/generate.gguf.sha256
+          if-no-files-found: error
+          retention-days: ${{ fromJSON(inputs.retention_days) }}
+
+      - name: Upload rerank artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-rerank
+          path: |
+            models/rerank.gguf
+            models/rerank.gguf.sha256
+          if-no-files-found: error
+          retention-days: ${{ fromJSON(inputs.retention_days) }}
